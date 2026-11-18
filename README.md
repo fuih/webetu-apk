@@ -4,6 +4,15 @@ Application Android conçue avec Flutter pour automatiser la réservation quotid
 
 ---
 
+## Téléchargement (APK)
+
+Les fichiers APK prêts à installer sont disponibles dans la section **Releases** (colonne de droite sur GitHub) :
+
+- **`WebEtu-Resto-v1.0.0-arm64.apk`** (~18 Mo — **recommandé** pour la majorité des smartphones Android)
+- **`WebEtu-Resto-v1.0.0-universal.apk`** (~51 Mo — compatible avec tous les appareils Android)
+
+---
+
 ## Fonctionnalités
 
 ### Connexion PROGRES & ONOU
