@@ -1,54 +1,60 @@
-# 📱 WebEtu Resto — Application Android (Flutter)
+# WebEtu Resto — Application Android (Flutter)
 
-Application mobile Android native (Flutter) pour l'automatisation de la réservation des repas universitaires **WebEtu (PROGRES)** et **ONOU** (Restauration Universitaire).
-
----
-
-## ✨ Fonctionnalités principales
-
-1. **🔐 Connexion PROGRES & ONOU** :
-   - Connexion avec votre Matricule BAC et mot de passe PROGRES.
-   - Option « Se souvenir de moi » avec sauvegarde locale uniquement sur votre appareil.
-   - Détection automatique de votre contexte étudiant (DIA, Wilaya, Résidence).
-
-2. **⚙️ Onglet « Auto » (Pilote automatique)** :
-   - **Réservation automatique en arrière-plan** : Un bouton unique active la tâche quotidienne via Android WorkManager.
-   - **Choix des repas** : Petit-déjeuner (`فطور`), Déjeuner (`غداء`), Dîner (`عشاء`).
-   - **Jours de la semaine** : Sélection personnalisable des jours actifs (par défaut du dimanche au jeudi).
-   - **Sélecteur de restaurant** : Liste en direct des restaurants universitaires rattachés à votre compte avec recherche (FR / AR).
-   - **Résilience hors-ligne** : Si le téléphone n'a pas de connexion internet au moment prévu, Android met la tâche en attente et la déclenche automatiquement dès le retour du réseau (Wi-Fi ou 4G).
-   - **Action immédiate** : Bouton pour lancer une réservation manuelle instantanée.
-
-3. **📋 Onglet « Historique » (Vos réservations)** :
-   - Résumé mensuel du nombre de repas réservés et heure de dernière synchronisation.
-   - Filtres rapides (*Tous*, *Réservés*, *À vérifier*).
-   - Liste groupée par date (*Aujourd'hui*, *Demain*, etc.) avec indicateur de repas et possibilité d'annuler les repas encore modifiables (`candelete`).
+Application Android conçue avec Flutter pour automatiser la réservation quotidienne des repas universitaires sur **WebEtu (PROGRES / ONOU)**.
 
 ---
 
-## 🛠️ Compiler l'APK depuis les sources
+## Fonctionnalités
+
+### Connexion PROGRES & ONOU
+- Authentification avec votre matricule BAC et votre mot de passe PROGRES.
+- Option **« Se souvenir de moi »** : vos identifiants restent enregistrés uniquement en local sur votre téléphone (aucun serveur tiers).
+- Récupération automatique de vos informations étudiantes (DIA, wilaya, résidence).
+
+### Onglet « Auto » — Réservation automatique
+- **Activation en un geste** : un seul interrupteur active la réservation quotidienne en arrière-plan via Android WorkManager.
+- **Choix des repas** : sélection libre entre Petit-déjeuner (فطور), Déjeuner (غداء) et Dîner (عشاء).
+- **Jours actifs** : choix des jours de la semaine (du dimanche au jeudi par défaut).
+- **Choix du restaurant** : liste des restaurants universitaires disponibles pour votre compte, avec recherche en français et en arabe.
+- **Gestion du hors-ligne** : si le téléphone n'a pas de connexion à l'heure prévue, la tâche attend automatiquement le retour du Wi-Fi ou de la 4G pour effectuer la réservation.
+- **Réservation immédiate** : bouton dédié pour lancer une réservation tout de suite sans attendre le prochain passage automatique.
+
+### Onglet « Historique » — Suivi des réservations
+- Compteur de repas réservés et heure de la dernière synchronisation.
+- Filtres rapides (*Tous*, *Réservés*, *À vérifier*).
+- Liste regroupée par date (*Aujourd'hui*, *Demain*, etc.) avec possibilité d'annuler les réservations encore modifiables.
+
+---
+
+## Remarque importante (Réseau)
+
+Les serveurs PROGRES / ONOU bloquent les connexions provenant d'adresses IP étrangères. L'application doit donc être utilisée depuis une connexion algérienne (Wi-Fi local ou 4G), sans VPN actif.
+
+---
+
+## Compiler l'APK
 
 Prérequis : [Flutter SDK](https://docs.flutter.dev/get-started/install) et Android SDK installés.
 
 ```bash
 flutter pub get
 
-# Version optimisée légère (ARM64, ~19 Mo — recommandée)
+# APK léger ARM64 (~19 Mo — recommandé pour la majorité des smartphones)
 flutter build apk --split-per-abi
 
-# Ou version universelle compatible toutes architectures (~52 Mo)
+# Ou APK universel (~52 Mo — compatible toutes architectures)
 flutter build apk --release
 ```
 
-Les fichiers générés se trouveront dans :
+Les fichiers générés se trouvent dans :
 - `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`
 - `build/app/outputs/flutter-apk/app-release.apk`
 
 ---
 
-## 📲 Installer l'APK sur Android
+## Installation sur Android
 
-1. Transférez le fichier `.apk` compilé sur votre smartphone.
-2. Ouvrez-le depuis votre gestionnaire de fichiers.
-3. Si Android le demande, autorisez l'installation depuis cette source.
-4. Appuyez sur **Installer**, puis connectez-vous avec vos identifiants WebEtu.
+1. Transférez le fichier `.apk` sur votre téléphone.
+2. Ouvrez-le depuis le gestionnaire de fichiers.
+3. Autorisez l'installation d'applications provenant de cette source si Android vous le demande.
+4. Installez l'application, connectez-vous avec vos identifiants WebEtu, choisissez votre restaurant et activez la réservation automatique.
