@@ -18,6 +18,7 @@ class PreferencesService {
   static const String _keyOnouToken = 'webetu_onou_token';
   static const String _keyStudentUuid = 'webetu_student_uuid';
   static const String _keyStudentContext = 'webetu_student_context';
+  static const String _keyLastAlertTimestamp = 'webetu_last_alert_ts';
 
   final SharedPreferences _prefs;
 
@@ -26,6 +27,11 @@ class PreferencesService {
   static Future<PreferencesService> getInstance() async {
     final prefs = await SharedPreferences.getInstance();
     return PreferencesService(prefs);
+  }
+
+  /// Reloads SharedPreferences from disk to see updates written by the background WorkManager isolate.
+  Future<void> reload() async {
+    await _prefs.reload();
   }
 
   bool get rememberMe => _prefs.getBool(_keyRememberMe) ?? false;
@@ -60,6 +66,16 @@ class PreferencesService {
     await _prefs.setString(_keyOnouToken, onouToken);
     await _prefs.setString(_keyStudentUuid, studentUuid);
     await _prefs.setString(_keyStudentContext, jsonEncode(studentContext.toJson()));
+  }
+
+  Future<void> updateOnouToken(String onouToken) async {
+    await _prefs.setString(_keyOnouToken, onouToken);
+  }
+
+  int get lastAlertTimestamp => _prefs.getInt(_keyLastAlertTimestamp) ?? 0;
+
+  Future<void> setLastAlertTimestamp(int epochMs) async {
+    await _prefs.setInt(_keyLastAlertTimestamp, epochMs);
   }
 
   Future<void> clearSession() async {

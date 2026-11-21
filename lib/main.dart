@@ -23,7 +23,14 @@ void main() async {
   );
 
   final prefsService = await PreferencesService.getInstance();
-  final apiService = WebetuApiService();
+  final apiService = WebetuApiService(
+    onOnouTokenRefreshed: (newToken) => prefsService.updateOnouToken(newToken),
+  );
+
+  // Self-heal periodic background schedule if user already enabled auto-reserve
+  await BackgroundReservationService.ensureScheduledIfEnabled(
+    prefsService.isBackgroundAutoReserveEnabled,
+  );
 
   runApp(WebetuRestoApp(
     prefsService: prefsService,
@@ -101,73 +108,79 @@ class _SplashScreenState extends State<SplashScreen> {
     final user = widget.prefsService.savedUsername;
     final pass = widget.prefsService.savedPassword;
 
-    if (remember && user != null && user.isNotEmpty) {
-      // 1. Try to restore and validate existing active session first (avoids re-prompting 2FA)
-      final savedProgresToken = widget.prefsService.savedProgresToken;
-      final savedOnouToken = widget.prefsService.savedOnouToken;
-      final savedStudentUuid = widget.prefsService.savedStudentUuid;
-      final savedCtx = widget.prefsService.savedStudentContext;
+    // 1. Try to restore and validate existing active session first (avoids re-prompting 2FA).
+    // If only ONOU token expired while PROGRES token is still valid, silently renews ONOU token.
+    // If the phone is temporarily offline (networkError), keep the user logged in rather than
+    // kicking a 2FA account back to the login screen.
+    final savedProgresToken = widget.prefsService.savedProgresToken;
+    final savedOnouToken = widget.prefsService.savedOnouToken;
+    final savedStudentUuid = widget.prefsService.savedStudentUuid;
+    final savedCtx = widget.prefsService.savedStudentContext;
 
-      if (savedProgresToken != null &&
-          savedOnouToken != null &&
-          savedStudentUuid != null &&
-          savedCtx != null) {
-        widget.apiService.restoreSession(
-          progresToken: savedProgresToken,
-          onouToken: savedOnouToken,
-          studentUuid: savedStudentUuid,
-          studentContext: savedCtx,
-          username: user,
+    if (savedProgresToken != null &&
+        savedOnouToken != null &&
+        savedStudentUuid != null &&
+        savedCtx != null) {
+      widget.apiService.restoreSession(
+        progresToken: savedProgresToken,
+        onouToken: savedOnouToken,
+        studentUuid: savedStudentUuid,
+        studentContext: savedCtx,
+        username: user,
+      );
+
+      final status = await widget.apiService.validateAndRefreshSession();
+      if (status == SessionStatus.valid ||
+          status == SessionStatus.refreshed ||
+          status == SessionStatus.networkError) {
+        if (status == SessionStatus.refreshed && widget.apiService.onouToken != null) {
+          await widget.prefsService.updateOnouToken(widget.apiService.onouToken!);
+        }
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(
+              apiService: widget.apiService,
+              prefsService: widget.prefsService,
+              studentContext: savedCtx,
+            ),
+          ),
         );
-
-        final isValid = await widget.apiService.validateSession();
-        if (isValid) {
-          if (!mounted) return;
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => HomeScreen(
-                apiService: widget.apiService,
-                prefsService: widget.prefsService,
-                studentContext: savedCtx,
-              ),
-            ),
-          );
-          return;
-        }
+        return;
       }
+    }
 
-      // 2. Fallback to password re-login if session expired (works seamlessly if 2FA is not active)
-      if (pass != null && pass.isNotEmpty) {
-        try {
-          final studentCtx = await widget.apiService.authenticate(user, pass);
-          if (widget.apiService.progresToken != null &&
-              widget.apiService.onouToken != null &&
-              widget.apiService.studentUuid != null) {
-            await widget.prefsService.saveSession(
-              progresToken: widget.apiService.progresToken!,
-              onouToken: widget.apiService.onouToken!,
-              studentUuid: widget.apiService.studentUuid!,
-              studentContext: studentCtx,
-            );
-          }
-
-          if (!mounted) return;
-
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => HomeScreen(
-                apiService: widget.apiService,
-                prefsService: widget.prefsService,
-                studentContext: studentCtx,
-              ),
-            ),
+    // 2. Fallback to password re-login if session genuinely expired (works seamlessly if 2FA is off)
+    if (remember && user != null && user.isNotEmpty && pass != null && pass.isNotEmpty) {
+      try {
+        final studentCtx = await widget.apiService.authenticate(user, pass);
+        if (widget.apiService.progresToken != null &&
+            widget.apiService.onouToken != null &&
+            widget.apiService.studentUuid != null) {
+          await widget.prefsService.saveSession(
+            progresToken: widget.apiService.progresToken!,
+            onouToken: widget.apiService.onouToken!,
+            studentUuid: widget.apiService.studentUuid!,
+            studentContext: studentCtx,
           );
-          return;
-        } catch (_) {
-          // Fallback to login screen (e.g. if 2FA code is needed or password changed)
         }
+
+        if (!mounted) return;
+
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(
+              apiService: widget.apiService,
+              prefsService: widget.prefsService,
+              studentContext: studentCtx,
+            ),
+          ),
+        );
+        return;
+      } catch (_) {
+        // Fallback to login screen (e.g. if 2FA code is needed or password changed)
       }
     }
 

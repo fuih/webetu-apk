@@ -8,13 +8,15 @@ Application Android conçue avec Flutter pour automatiser la réservation quotid
 
 Les fichiers APK prêts à installer sont disponibles dans la section **Releases** :
 
-- **[`WebEtu-Resto-v1.2.0-arm64.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.2.0/WebEtu-Resto-v1.2.0-arm64.apk)** (~18 Mo — **recommandé** pour la majorité des smartphones Android récents)
-- **[`WebEtu-Resto-v1.2.0-universal.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.2.0/WebEtu-Resto-v1.2.0-universal.apk)** (~51 Mo — compatible avec tous les appareils Android)
+- **[`WebEtu-Resto-v1.3.0-arm64.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.3.0/WebEtu-Resto-v1.3.0-arm64.apk)** (~18 Mo — **recommandé** pour la majorité des smartphones Android récents)
+- **[`WebEtu-Resto-v1.3.0-universal.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.3.0/WebEtu-Resto-v1.3.0-universal.apk)** (~51 Mo — compatible avec tous les appareils Android)
 
-> 🚀 **Nouveautés v1.2.0** :
-> - **Session 2FA persistante** : connexion automatique instantanée au démarrage sans redemander les identifiants ni le code 2FA.
-> - **Réservation en arrière-plan & Notifications** : demande d'autorisation d'ignorer l'optimisation de batterie et d'envoyer les notifications pour garantir la réservation nocturne automatique.
-> - **Alignement de la navigation** : icône « Historique » parfaitement centrée et symétrique.
+> 🛡️ **Nouveautés v1.3.0 (Fiabilité maximale de l'auto-réservation)** :
+> - **Double vérification directe sur ONOU** : après chaque réservation, l'application revérifie la liste réelle sur le serveur ONOU et relance immédiatement tout repas non confirmé.
+> - **Correction critique premier lancement** : sauvegarde automatique du restaurant par défaut, des repas, des jours actifs et de la session dès l'activation (avec réservation immédiate + contrôle toutes les 4h).
+> - **Renouvellement silencieux du token ONOU (compatible 2FA)** : si le token ONOU expire alors que la session PROGRES est encore valide, il est renouvelé automatiquement sans redemander le code 2FA.
+> - **Reprises automatiques & alertes** : 3 tentatives avec nouvelle signature HMAC en cas d'erreur réseau/`Expired request`, reprise WorkManager garantie, et notification urgente si la session 2FA expire ou si le repas de demain n'est pas confirmé.
+> - **Tableau de bord arrière-plan & bouton de test** : affichage en direct de l'état WorkManager, batterie, notifications, raccourci *Démarrage automatique* (Xiaomi / OEM), et bouton pour tester l'arrière-plan en un clic.
 
 ---
 

@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -6,182 +5,89 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
-import '../models/student_context.dart';
+import 'reservation_engine.dart';
 import 'webetu_api_service.dart';
 
 const String kDailyReservationTask = "dz.mesrs.webetu.daily_reservation";
+const String kImmediateSyncTask = "dz.mesrs.webetu.immediate_sync";
+const String kManualTestTask = "dz.mesrs.webetu.manual_bg_test";
 
-/// Top-level background dispatcher required by WorkManager
+/// Top-level background dispatcher required by WorkManager.
+/// Must keep @pragma('vm:entry-point') so AOT/obfuscation preserves its callback handle.
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
     WidgetsFlutterBinding.ensureInitialized();
     HttpOverrides.global = WebetuHttpOverrides();
 
+    final isManualTest =
+        taskName == "manualBgTestTask" || (inputData != null && inputData['isManualTest'] == true);
+
     try {
       final prefs = await SharedPreferences.getInstance();
-      final isEnabled = prefs.getBool('webetu_bg_auto_reserve') ?? false;
-      if (!isEnabled) {
-        return true;
-      }
-
-      final username = prefs.getString('webetu_username');
-      final password = prefs.getString('webetu_password');
-      if (username == null || password == null || username.isEmpty || password.isEmpty) {
-        return true;
-      }
-
-      final depotId = prefs.getInt('webetu_default_depot');
-      if (depotId == null || depotId == 0) {
-        return true;
-      }
-
-      final rawMeals = prefs.getStringList('webetu_default_meals') ?? ['2', '3'];
-      final meals = rawMeals.map((e) => int.tryParse(e) ?? 2).toList();
-      final window = prefs.getInt('webetu_auto_window') ?? 3;
-      final rawDays = prefs.getStringList('webetu_active_days');
-      final activeDays = rawDays?.map((e) => int.tryParse(e) ?? 1).toSet() ?? {7, 1, 2, 3, 4};
-
       final api = WebetuApiService();
 
-      // Check if we have an active saved session (especially useful for 2FA accounts)
-      final savedProgresToken = prefs.getString('webetu_progres_token');
-      final savedOnouToken = prefs.getString('webetu_onou_token');
-      final savedStudentUuid = prefs.getString('webetu_student_uuid');
-      final savedCtxJson = prefs.getString('webetu_student_context');
-
-      bool sessionRestored = false;
-      if (savedProgresToken != null && savedOnouToken != null && savedStudentUuid != null && savedCtxJson != null) {
-        try {
-          final ctx = StudentContext.fromJson(jsonDecode(savedCtxJson));
-          api.restoreSession(
-            progresToken: savedProgresToken,
-            onouToken: savedOnouToken,
-            studentUuid: savedStudentUuid,
-            studentContext: ctx,
-            username: username,
+      final outcome = await ReservationEngine.run(
+        prefs: prefs,
+        api: api,
+        isManualTest: isManualTest,
+        ignoreEnabledCheck: isManualTest,
+        notify: ({required title, required body, bool isAlert = false}) async {
+          await _showLocalNotification(
+            title: title,
+            body: body,
+            isAlert: isAlert,
           );
-          sessionRestored = true;
-        } catch (_) {}
-      }
-
-      if (!sessionRestored) {
-        await api.authenticate(username, password);
-      } else {
-        try {
-          await api.getReservations();
-        } catch (_) {
-          // Token expired, re-authenticate if possible
-          await api.authenticate(username, password);
-          if (api.isAuthenticated && api.studentContext != null) {
-            await prefs.setString('webetu_progres_token', api.progresToken!);
-            await prefs.setString('webetu_onou_token', api.onouToken!);
-            await prefs.setString('webetu_student_uuid', api.studentUuid!);
-            await prefs.setString('webetu_student_context', jsonEncode(api.studentContext!.toJson()));
-          }
-        }
-      }
-
-      final existingReservations = await api.getReservations();
-      final now = DateTime.now();
-
-      int successCount = 0;
-      int skippedCount = 0;
-      int errorCount = 0;
-
-      for (int i = 1; i <= window; i++) {
-        final targetDate = now.add(Duration(days: i));
-        if (!activeDays.contains(targetDate.weekday)) {
-          continue; // Skip inactive days of week (e.g. weekend)
-        }
-
-        final dateStr = "${targetDate.year.toString().padLeft(4, '0')}-"
-            "${targetDate.month.toString().padLeft(2, '0')}-"
-            "${targetDate.day.toString().padLeft(2, '0')}";
-
-        final results = await api.reserveMeals(
-          dateStr: dateStr,
-          mealTypes: meals,
-          depotId: depotId,
-          existingReservations: existingReservations,
-        );
-
-        for (final r in results) {
-          if (r.isSuccess) successCount++;
-          if (r.isSkipped) skippedCount++;
-          if (r.status == 'failed' || r.status == 'error') errorCount++;
-        }
-      }
-
-      final nowFormatted = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} "
-          "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
-
-      await prefs.setString('webetu_last_bg_run_time', nowFormatted);
-      await prefs.setString('webetu_last_bg_run_status', errorCount > 0 && successCount == 0 ? 'error' : 'success');
-
-      String summary;
-      if (successCount > 0) {
-        summary = "$successCount repas réservé(s) pour les prochains jours !";
-      } else if (skippedCount > 0) {
-        summary = "Tous les repas sont déjà réservés ($skippedCount repas vérifiés).";
-      } else {
-        summary = "Aucun créneau disponible pour le moment.";
-      }
-
-      if (errorCount > 0) {
-        summary += " ($errorCount erreur(s))";
-      }
-
-      await prefs.setString('webetu_last_bg_run_message', summary);
-
-      // Display local notification on student's phone
-      await _showLocalNotification(
-        title: "WebEtu Resto : Réservation Automatique",
-        body: summary,
+        },
       );
 
-      return true;
+      // Returning false tells Android WorkManager to retry automatically with backoff!
+      return !outcome.shouldRetryLater;
     } catch (e) {
-      final now = DateTime.now();
-      final nowFormatted = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} "
-          "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('webetu_last_bg_run_time', nowFormatted);
-      await prefs.setString('webetu_last_bg_run_status', 'error');
-
-      String errorMessage = "Échec de connexion : $e. Nouvelle tentative programmée.";
-      if (e is MfaRequiredException || e.toString().contains('2FA') || e.toString().contains('mfaKey')) {
-        errorMessage = "Double authentification (2FA) active : ouvrez l'application ou désactivez la 2FA dans WebEtu officiel pour l'auto-réservation.";
-      }
-
-      await prefs.setString('webetu_last_bg_run_message', errorMessage);
-
-      // Return false to tell Android WorkManager to retry when network condition is met
+      try {
+        final now = DateTime.now();
+        final nowFormatted =
+            "${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} "
+            "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}";
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('webetu_last_bg_run_time', nowFormatted);
+        await prefs.setString('webetu_last_bg_run_status', 'error');
+        await prefs.setString(
+          'webetu_last_bg_run_message',
+          "Erreur inattendue en arrière-plan : $e. Nouvelle tentative programmée.",
+        );
+      } catch (_) {}
       return false;
     }
   });
 }
 
-Future<void> _showLocalNotification({required String title, required String body}) async {
+Future<void> _showLocalNotification({
+  required String title,
+  required String body,
+  bool isAlert = false,
+}) async {
   try {
     final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
     const initSettings = InitializationSettings(android: androidSettings);
     await flutterLocalNotificationsPlugin.initialize(initSettings);
 
-    const androidDetails = AndroidNotificationDetails(
-      'webetu_auto_reserve_channel',
-      'Réservations WebEtu',
-      channelDescription: 'Notifications de réservation automatique des repas ONOU',
-      importance: Importance.high,
-      priority: Priority.high,
+    final androidDetails = AndroidNotificationDetails(
+      isAlert ? 'webetu_auto_reserve_alerts' : 'webetu_auto_reserve_channel',
+      isAlert ? 'Alertes WebEtu Resto' : 'Réservations WebEtu',
+      channelDescription: isAlert
+          ? 'Alertes urgentes (session expirée ou repas de demain non confirmé)'
+          : 'Confirmations de réservation automatique des repas ONOU',
+      importance: isAlert ? Importance.max : Importance.high,
+      priority: isAlert ? Priority.max : Priority.high,
+      styleInformation: BigTextStyleInformation(body),
       icon: '@mipmap/ic_launcher',
     );
-    const notificationDetails = NotificationDetails(android: androidDetails);
+    final notificationDetails = NotificationDetails(android: androidDetails);
 
     await flutterLocalNotificationsPlugin.show(
-      1001,
+      isAlert ? 1002 : 1001,
       title,
       body,
       notificationDetails,
@@ -192,48 +98,101 @@ Future<void> _showLocalNotification({required String title, required String body
 }
 
 class BackgroundReservationService {
+  static bool _initialized = false;
+  static const MethodChannel _platform = MethodChannel('dz.mesrs.webetu/background_service');
+
   static Future<void> initialize() async {
+    if (_initialized) return;
     try {
       await Workmanager().initialize(callbackDispatcher);
-    } catch (_) {}
+      _initialized = true;
+    } catch (_) {
+      _initialized = false;
+    }
   }
 
-  /// Registers daily background periodic task.
+  /// Registers periodic background reservation task (every 4 hours = 6x/day).
   /// Uses NetworkType.connected: if there is no internet, Android WorkManager
-  /// will automatically wait and trigger as soon as the phone connects to 4G or Wi-Fi!
-  static Future<void> enableDailyReservation() async {
+  /// automatically holds the task and executes it the moment 4G or Wi-Fi returns!
+  static Future<void> enableDailyReservation({bool runImmediateSync = false}) async {
+    await initialize();
     await Workmanager().registerPeriodicTask(
       kDailyReservationTask,
       "dailyReservationTask",
-      frequency: const Duration(hours: 12),
+      frequency: const Duration(hours: 4),
       constraints: Constraints(
-        networkType: NetworkType.connected, // <--- OFFLINE RESILIENCE!
+        networkType: NetworkType.connected,
       ),
       existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
       backoffPolicy: BackoffPolicy.exponential,
       backoffPolicyDelay: const Duration(minutes: 15),
     );
+
+    if (runImmediateSync) {
+      await triggerImmediateSync();
+    }
   }
 
-  /// Cancels the scheduled daily background task
+  /// Self-heals the periodic schedule on app startup / resume if the toggle is ON
+  /// but Android cleared or hasn't registered the periodic WorkManager job yet.
+  static Future<void> ensureScheduledIfEnabled(bool isEnabled) async {
+    await initialize();
+    if (!isEnabled) return;
+    try {
+      final scheduled = await isDailyTaskScheduled();
+      if (!scheduled) {
+        await enableDailyReservation(runImmediateSync: false);
+      }
+    } catch (_) {}
+  }
+
+  /// Queries Android WorkManager directly to check if the periodic task is ENQUEUED or RUNNING.
+  static Future<bool> isDailyTaskScheduled() async {
+    try {
+      await initialize();
+      return await Workmanager().isScheduledByUniqueName(kDailyReservationTask);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Cancels the scheduled periodic background task
   static Future<void> disableDailyReservation() async {
+    await initialize();
     await Workmanager().cancelByUniqueName(kDailyReservationTask);
   }
 
-  /// Schedules an immediate one-off background execution (e.g. on Wi-Fi reconnect)
+  /// Schedules an immediate one-off background execution (e.g. after changing settings or reconnecting)
   static Future<void> triggerImmediateSync() async {
+    await initialize();
     await Workmanager().registerOneOffTask(
-      "dz.mesrs.webetu.sync_${DateTime.now().millisecondsSinceEpoch}",
+      kImmediateSyncTask,
       "syncReservationTask",
       constraints: Constraints(
         networkType: NetworkType.connected,
       ),
+      existingWorkPolicy: ExistingWorkPolicy.replace,
       backoffPolicy: BackoffPolicy.exponential,
-      backoffPolicyDelay: const Duration(minutes: 5),
+      backoffPolicyDelay: const Duration(minutes: 10),
     );
   }
 
-  static const MethodChannel _platform = MethodChannel('dz.mesrs.webetu/background_service');
+  /// Schedules an expedited one-off WorkManager task that ALWAYS fires a notification
+  /// so the user can test and verify real Android background execution on their phone.
+  static Future<void> triggerBackgroundTest() async {
+    await initialize();
+    await Workmanager().registerOneOffTask(
+      kManualTestTask,
+      "manualBgTestTask",
+      inputData: {'isManualTest': true},
+      constraints: Constraints(
+        networkType: NetworkType.connected,
+      ),
+      existingWorkPolicy: ExistingWorkPolicy.replace,
+      expedited: true,
+      outOfQuotaPolicy: OutOfQuotaPolicy.runAsNonExpeditedWorkRequest,
+    );
+  }
 
   /// Requests notification permission on Android 13+
   static Future<bool> requestNotificationPermission() async {
@@ -242,7 +201,17 @@ class BackgroundReservationService {
       final androidImpl = flutterLocalNotificationsPlugin
           .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       final granted = await androidImpl?.requestNotificationsPermission();
-      return granted ?? true;
+      return granted ?? await areNotificationsEnabled();
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Checks whether OS notifications are currently allowed for this app
+  static Future<bool> areNotificationsEnabled() async {
+    try {
+      final res = await _platform.invokeMethod<bool>('areNotificationsEnabled');
+      return res ?? true;
     } catch (_) {
       return true;
     }
@@ -262,6 +231,30 @@ class BackgroundReservationService {
   static Future<void> requestIgnoreBatteryOptimization() async {
     try {
       await _platform.invokeMethod('requestIgnoreBatteryOptimization');
+    } catch (_) {}
+  }
+
+  /// Returns true on OEM devices known to aggressively restrict background tasks (Xiaomi, Oppo, Huawei, etc.)
+  static Future<bool> isRestrictedOem() async {
+    try {
+      final res = await _platform.invokeMethod<bool>('isRestrictedOem');
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens OEM AutoStart / Background permissions screen (with fallback to App Details Settings)
+  static Future<void> openAutoStartSettings() async {
+    try {
+      await _platform.invokeMethod('openAutoStartSettings');
+    } catch (_) {}
+  }
+
+  /// Opens standard Android App Details settings (for notifications / battery / permissions)
+  static Future<void> openAppSettings() async {
+    try {
+      await _platform.invokeMethod('openAppSettings');
     } catch (_) {}
   }
 }

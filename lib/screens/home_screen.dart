@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart' hide TextDirection;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/restaurant.dart';
 import '../models/reservation.dart';
 import '../models/student_context.dart';
 import '../services/webetu_api_service.dart';
 import '../services/preferences_service.dart';
 import '../services/background_service.dart';
+import '../services/reservation_engine.dart';
 import 'login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -24,7 +26,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _currentTabIndex = 0; // 0: Auto (Préférences), 1: Historique (Réservations)
 
   List<Restaurant> _restaurants = [];
@@ -35,6 +37,12 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoadingReservations = true;
   bool _isReservingNow = false;
   bool _isBackgroundEnabled = false;
+  bool _isWorkScheduled = false;
+  bool _isBatteryUnrestricted = true;
+  bool _areNotificationsAllowed = true;
+  bool _isRestrictedOem = false;
+  bool _isTestingBackground = false;
+  bool _hasTriggeredForegroundSafetyNet = false;
 
   // Selected meal types: 1 (Petit-déj), 2 (Déjeuner), 3 (Dîner)
   final Set<int> _selectedMeals = {2, 3};
@@ -46,12 +54,12 @@ class _HomeScreenState extends State<HomeScreen> {
   String _activeFilter = 'all';
 
   // Real-time reservation feedback items
-  final List<ReservationResultItem> _latestResults = [];
   String? _lastExecutionSummary;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _selectedMeals.clear();
     _selectedMeals.addAll(widget.prefsService.defaultMeals);
     _activeDays.clear();
@@ -61,11 +69,131 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadInitialData();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshOnResume();
+    }
+  }
+
+  Future<void> _refreshOnResume() async {
+    await widget.prefsService.reload();
+    await _loadBackgroundDiagnostics();
+    if (mounted) {
+      setState(() {
+        _isBackgroundEnabled = widget.prefsService.isBackgroundAutoReserveEnabled;
+      });
+    }
+    await _loadReservations(silent: true);
+  }
+
   Future<void> _loadInitialData() async {
+    await widget.prefsService.reload();
     await Future.wait([
       _loadRestaurants(),
       _loadReservations(),
+      _loadBackgroundDiagnostics(),
     ]);
+    await _runForegroundSafetyNetIfNeeded();
+  }
+
+  Future<void> _loadBackgroundDiagnostics() async {
+    try {
+      await widget.prefsService.reload();
+      if (_isBackgroundEnabled) {
+        await BackgroundReservationService.ensureScheduledIfEnabled(true);
+      }
+      final results = await Future.wait<bool>([
+        BackgroundReservationService.isDailyTaskScheduled(),
+        BackgroundReservationService.isBatteryOptimizationIgnored(),
+        BackgroundReservationService.areNotificationsEnabled(),
+        BackgroundReservationService.isRestrictedOem(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _isWorkScheduled = results[0];
+        _isBatteryUnrestricted = results[1];
+        _areNotificationsAllowed = results[2];
+        _isRestrictedOem = results[3];
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _persistCurrentConfigAndSession() async {
+    await widget.prefsService.saveDefaultMeals(_selectedMeals.toList());
+    await widget.prefsService.saveActiveDaysOfWeek(_activeDays);
+    if (_selectedRestaurant != null) {
+      await widget.prefsService.saveDefaultDepot(_selectedRestaurant!.id);
+    }
+    if (widget.apiService.progresToken != null &&
+        widget.apiService.onouToken != null &&
+        widget.apiService.studentUuid != null) {
+      await widget.prefsService.saveSession(
+        progresToken: widget.apiService.progresToken!,
+        onouToken: widget.apiService.onouToken!,
+        studentUuid: widget.apiService.studentUuid!,
+        studentContext: widget.studentContext,
+      );
+    }
+  }
+
+  /// Belt-and-suspenders safety net: whenever the user opens the app while Auto-Reserve is ON,
+  /// ensure their config/session is persisted and immediately fill any missing active meals in the 3-day window.
+  Future<void> _runForegroundSafetyNetIfNeeded() async {
+    if (_hasTriggeredForegroundSafetyNet || !_isBackgroundEnabled) return;
+    if (_selectedRestaurant == null || _selectedMeals.isEmpty) return;
+    _hasTriggeredForegroundSafetyNet = true;
+
+    await _persistCurrentConfigAndSession();
+
+    // Quick check if any upcoming active slot is missing before doing any POST calls
+    final now = DateTime.now();
+    final window = widget.prefsService.autoReserveWindow;
+    bool hasMissingSlot = false;
+    for (int i = 1; i <= window; i++) {
+      final d = now.add(Duration(days: i));
+      if (!_activeDays.contains(d.weekday)) continue;
+      final dateStr = DateFormat('yyyy-MM-dd').format(d);
+      for (final meal in _selectedMeals) {
+        if (!widget.apiService.isAlreadyReserved(dateStr, meal, _reservations)) {
+          hasMissingSlot = true;
+          break;
+        }
+      }
+      if (hasMissingSlot) break;
+    }
+
+    if (!hasMissingSlot) return;
+
+    try {
+      final rawPrefs = await SharedPreferences.getInstance();
+      final outcome = await ReservationEngine.run(
+        prefs: rawPrefs,
+        api: widget.apiService,
+        ignoreEnabledCheck: true,
+      );
+      await widget.prefsService.reload();
+      if (!mounted) return;
+      if (outcome.verifiedReservations.isNotEmpty) {
+        final sorted = List<Reservation>.from(outcome.verifiedReservations)
+          ..sort((a, b) => b.dateReserve.compareTo(a.dateReserve));
+        setState(() {
+          _reservations = sorted;
+          if (outcome.newlyReservedCount > 0) {
+            _lastExecutionSummary = outcome.summary;
+          }
+        });
+      }
+      if (outcome.newlyReservedCount > 0) {
+        _showSnackbar('✓ ${outcome.summary}');
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadRestaurants() async {
@@ -74,16 +202,24 @@ class _HomeScreenState extends State<HomeScreen> {
       final list = await widget.apiService.getRestaurants();
       if (!mounted) return;
 
+      Restaurant? chosen;
+      bool shouldPersistDefault = false;
+      final savedDepotId = widget.prefsService.defaultDepotId;
+      if (savedDepotId != null && list.any((r) => r.id == savedDepotId)) {
+        chosen = list.firstWhere((r) => r.id == savedDepotId);
+      } else if (list.isNotEmpty) {
+        chosen = list.first;
+        shouldPersistDefault = true;
+      }
+
+      if (shouldPersistDefault && chosen != null) {
+        await widget.prefsService.saveDefaultDepot(chosen.id);
+      }
+
+      if (!mounted) return;
       setState(() {
         _restaurants = list;
-        final savedDepotId = widget.prefsService.defaultDepotId;
-        if (savedDepotId != null && list.any((r) => r.id == savedDepotId)) {
-          _selectedRestaurant = list.firstWhere((r) => r.id == savedDepotId);
-        } else if (list.isNotEmpty) {
-          _selectedRestaurant = list.first;
-        } else {
-          _selectedRestaurant = null;
-        }
+        _selectedRestaurant = chosen;
       });
     } catch (e) {
       if (!mounted) return;
@@ -93,8 +229,10 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _loadReservations() async {
-    setState(() => _isLoadingReservations = true);
+  Future<void> _loadReservations({bool silent = false}) async {
+    if (!silent) {
+      setState(() => _isLoadingReservations = true);
+    }
     try {
       final list = await widget.apiService.getReservations();
       if (!mounted) return;
@@ -103,14 +241,15 @@ class _HomeScreenState extends State<HomeScreen> {
         _reservations = list;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || silent) return;
       _showSnackbar('Erreur de chargement des réservations: $e', isError: true);
     } finally {
-      if (mounted) setState(() => _isLoadingReservations = false);
+      if (mounted && !silent) setState(() => _isLoadingReservations = false);
     }
   }
 
   void _showSnackbar(String message, {bool isError = false}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -138,18 +277,58 @@ class _HomeScreenState extends State<HomeScreen> {
     await widget.prefsService.setBackgroundAutoReserveEnabled(value);
 
     if (value) {
-      await BackgroundReservationService.enableDailyReservation();
-      _showSnackbar('Pilote automatique activé ! Vos repas seront réservés chaque jour.');
+      // Persist restaurant, meals, active days & session tokens BEFORE scheduling WorkManager!
+      await _persistCurrentConfigAndSession();
+      await BackgroundReservationService.enableDailyReservation(runImmediateSync: false);
+      await _loadBackgroundDiagnostics();
+
+      _showSnackbar('Pilote automatique activé ! Vérification toutes les 4h + réservation immédiate.');
 
       // Request notification permission and background battery optimization
       await BackgroundReservationService.requestNotificationPermission();
-      final isIgnored = await BackgroundReservationService.isBatteryOptimizationIgnored();
-      if (!isIgnored && mounted) {
+      await _loadBackgroundDiagnostics();
+
+      if ((!_isBatteryUnrestricted || !_areNotificationsAllowed) && mounted) {
         await _showBackgroundOptimizationPrompt();
+      }
+
+      // Immediately book & verify upcoming meals so the student is covered right now
+      if (mounted && !_isReservingNow) {
+        await _runManualReserveNow();
       }
     } else {
       await BackgroundReservationService.disableDailyReservation();
+      await _loadBackgroundDiagnostics();
       _showSnackbar('Pilote automatique mis en pause.');
+    }
+  }
+
+  Future<void> _triggerBackgroundTest() async {
+    if (_selectedRestaurant == null) {
+      _showSnackbar('Veuillez d\'abord sélectionner un restaurant.', isError: true);
+      return;
+    }
+
+    setState(() => _isTestingBackground = true);
+    try {
+      await _persistCurrentConfigAndSession();
+      await BackgroundReservationService.requestNotificationPermission();
+      await BackgroundReservationService.triggerBackgroundTest();
+      _showSnackbar(
+        'Test arrière-plan lancé via Android WorkManager ! Une notification va apparaître dans quelques secondes.',
+      );
+
+      // Refresh UI automatically after WorkManager finishes its headless run
+      for (final waitSec in [4, 6]) {
+        await Future.delayed(Duration(seconds: waitSec));
+        if (!mounted) return;
+        await _loadBackgroundDiagnostics();
+        await _loadReservations(silent: true);
+      }
+    } catch (e) {
+      _showSnackbar('Erreur lors du lancement du test : $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _isTestingBackground = false);
     }
   }
 
@@ -244,6 +423,31 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             const SizedBox(height: 20),
+            if (!_areNotificationsAllowed) ...[
+              SizedBox(
+                width: double.infinity,
+                height: 46,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Color(0xFF00796B)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                  ),
+                  icon: const Icon(Icons.notifications_active_rounded, color: Color(0xFF00796B), size: 18),
+                  onPressed: () async {
+                    final granted = await BackgroundReservationService.requestNotificationPermission();
+                    if (!granted) {
+                      await BackgroundReservationService.openAppSettings();
+                    }
+                    await _loadBackgroundDiagnostics();
+                  },
+                  label: const Text(
+                    'Activer les notifications',
+                    style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF00796B)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
             SizedBox(
               width: double.infinity,
               height: 48,
@@ -256,9 +460,31 @@ class _HomeScreenState extends State<HomeScreen> {
                   Navigator.pop(ctx);
                   await BackgroundReservationService.requestIgnoreBatteryOptimization();
                 },
-                child: const Text('Autoriser l\'arrière-plan', style: TextStyle(fontWeight: FontWeight.bold)),
+                child: const Text('Autoriser la batterie sans restriction', style: TextStyle(fontWeight: FontWeight.bold)),
               ),
             ),
+            if (_isRestrictedOem) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Color(0xFFE0E7E5)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                  ),
+                  icon: const Icon(Icons.settings_power_rounded, color: Color(0xFF172E2B), size: 18),
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    await BackgroundReservationService.openAutoStartSettings();
+                  },
+                  label: const Text(
+                    'Autoriser le démarrage automatique (Xiaomi / OEM)',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF172E2B)),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 6),
             Center(
               child: TextButton(
@@ -273,12 +499,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveAllPreferences() async {
-    await widget.prefsService.saveDefaultMeals(_selectedMeals.toList());
-    await widget.prefsService.saveActiveDaysOfWeek(_activeDays);
-    if (_selectedRestaurant != null) {
-      await widget.prefsService.saveDefaultDepot(_selectedRestaurant!.id);
+    await _persistCurrentConfigAndSession();
+    if (_isBackgroundEnabled) {
+      await BackgroundReservationService.enableDailyReservation(runImmediateSync: true);
+      await _loadBackgroundDiagnostics();
     }
-    _showSnackbar('Préférences enregistrées avec succès !');
+    _showSnackbar('Préférences enregistrées et synchronisées avec le pilote automatique !');
   }
 
   void _showRestaurantPicker() {
@@ -441,48 +667,34 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _isReservingNow = true;
-      _latestResults.clear();
       _lastExecutionSummary = null;
     });
 
     try {
-      final existing = await widget.apiService.getReservations();
-      final now = DateTime.now();
+      await _persistCurrentConfigAndSession();
+      final rawPrefs = await SharedPreferences.getInstance();
+      final outcome = await ReservationEngine.run(
+        prefs: rawPrefs,
+        api: widget.apiService,
+        ignoreEnabledCheck: true,
+      );
 
-      int successCount = 0;
-      int skippedCount = 0;
-      int errorCount = 0;
-
-      final window = widget.prefsService.autoReserveWindow;
-      for (int i = 1; i <= window; i++) {
-        final targetDate = now.add(Duration(days: i));
-        if (!_activeDays.contains(targetDate.weekday)) {
-          continue; // Respect active days
-        }
-
-        final dateStr = DateFormat('yyyy-MM-dd').format(targetDate);
-        final items = await widget.apiService.reserveMeals(
-          dateStr: dateStr,
-          mealTypes: _selectedMeals.toList(),
-          depotId: _selectedRestaurant!.id,
-          existingReservations: existing,
-        );
-
-        for (final r in items) {
-          _latestResults.add(r);
-          if (r.isSuccess) successCount++;
-          if (r.isSkipped) skippedCount++;
-          if (r.status == 'failed' || r.status == 'error') errorCount++;
-        }
-      }
+      await widget.prefsService.reload();
+      if (!mounted) return;
 
       setState(() {
-        _lastExecutionSummary = "Résultats : $successCount réservé(s), $skippedCount déjà confirmé(s)"
-            "${errorCount > 0 ? ', $errorCount échec(s)' : ''}";
+        _lastExecutionSummary = outcome.summary;
+        if (outcome.verifiedReservations.isNotEmpty) {
+          final sorted = List<Reservation>.from(outcome.verifiedReservations)
+            ..sort((a, b) => b.dateReserve.compareTo(a.dateReserve));
+          _reservations = sorted;
+        }
       });
 
-      _showSnackbar(_lastExecutionSummary!);
-      await _loadReservations();
+      _showSnackbar(outcome.summary, isError: outcome.status == 'error');
+      if (outcome.verifiedReservations.isEmpty) {
+        await _loadReservations(silent: true);
+      }
     } catch (e) {
       _showSnackbar('Erreur lors de la réservation : $e', isError: true);
     } finally {
@@ -611,6 +823,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               _loadRestaurants();
               _loadReservations();
+              _loadBackgroundDiagnostics();
             },
           ),
           Container(
@@ -835,36 +1048,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 20),
 
-            // 5. Retry policy / Offline resilience container (Node 2:253)
-            Container(
-              decoration: BoxDecoration(
-                color: const Color(0xFFEEF4F2),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
-                    'Sans réseau ? Rien n’est perdu.',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                      color: Color(0xFF235F53),
-                    ),
-                  ),
-                  SizedBox(height: 4),
-                  Text(
-                    'Les tentatives reprennent au retour d’Internet, si la réservation est encore ouverte.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF47645D),
-                      height: 1.4,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            // 5. Live Background Health & Offline Resilience Card
+            _buildBackgroundHealthCard(),
             const SizedBox(height: 16),
 
             // 6. Action Button: "Enregistrer mes préférences" (Node 2:256)
@@ -885,7 +1070,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 10),
 
-            // Quick instant reserve action
+            // Quick instant reserve action (runs full 2-pass server-verified booking)
             SizedBox(
               width: double.infinity,
               height: 44,
@@ -895,7 +1080,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00796B)))
                     : const Icon(Icons.bolt_rounded, size: 20, color: Color(0xFF00796B)),
                 label: Text(
-                  _isReservingNow ? 'Réservation en cours...' : '⚡ Réserver immédiatement pour demain',
+                  _isReservingNow ? 'Réservation & vérification...' : 'Réserver & vérifier maintenant',
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF00796B)),
                 ),
                 style: OutlinedButton.styleFrom(
@@ -910,6 +1095,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Center(
                 child: Text(
                   _lastExecutionSummary!,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF00796B)),
                 ),
               ),
@@ -917,6 +1103,222 @@ class _HomeScreenState extends State<HomeScreen> {
 
             const SizedBox(height: 16),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBackgroundHealthCard() {
+    final lastTime = widget.prefsService.lastBgRunTime;
+    final lastStatus = widget.prefsService.lastBgRunStatus;
+    final lastMsg = widget.prefsService.lastBgRunMessage;
+    final isLastError = lastStatus == 'error';
+
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFEEF4F2),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isLastError ? const Color(0xFFE57373) : const Color(0xFFD5E6E1),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                _isBackgroundEnabled && _isWorkScheduled
+                    ? Icons.verified_rounded
+                    : Icons.schedule_rounded,
+                size: 18,
+                color: const Color(0xFF00796B),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Fiabilité en arrière-plan (vérification toutes les 4h)',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                    color: Color(0xFF235F53),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Sans réseau ? Rien n’est perdu : Android relance la tâche dès le retour d’Internet et vérifie vos repas directement sur ONOU.',
+            style: TextStyle(
+              fontSize: 11.5,
+              color: Color(0xFF47645D),
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _buildDiagnosticChip(
+                label: _isBackgroundEnabled
+                    ? (_isWorkScheduled ? 'Planificateur actif ✓' : 'Planification...')
+                    : 'Planificateur en pause',
+                isOk: _isBackgroundEnabled && _isWorkScheduled,
+                onTap: _isBackgroundEnabled
+                    ? () async {
+                        await BackgroundReservationService.enableDailyReservation();
+                        await _loadBackgroundDiagnostics();
+                      }
+                    : null,
+              ),
+              _buildDiagnosticChip(
+                label: _areNotificationsAllowed ? 'Notifications ✓' : 'Activer notifications !',
+                isOk: _areNotificationsAllowed,
+                onTap: !_areNotificationsAllowed
+                    ? () async {
+                        final ok = await BackgroundReservationService.requestNotificationPermission();
+                        if (!ok) {
+                          await BackgroundReservationService.openAppSettings();
+                        }
+                        await _loadBackgroundDiagnostics();
+                      }
+                    : null,
+              ),
+              _buildDiagnosticChip(
+                label: _isBatteryUnrestricted ? 'Batterie libre ✓' : 'Autoriser batterie !',
+                isOk: _isBatteryUnrestricted,
+                onTap: !_isBatteryUnrestricted
+                    ? () async {
+                        await BackgroundReservationService.requestIgnoreBatteryOptimization();
+                        await _loadBackgroundDiagnostics();
+                      }
+                    : null,
+              ),
+            ],
+          ),
+          if (lastTime != null || lastMsg != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.75),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (lastTime != null)
+                    Text(
+                      'Dernière vérification : $lastTime',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF172E2B),
+                      ),
+                    ),
+                  if (lastMsg != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      lastMsg,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isLastError ? const Color(0xFFC62828) : const Color(0xFF2E7D32),
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          if (_isBackgroundEnabled) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton.icon(
+                    onPressed: _isTestingBackground ? null : _triggerBackgroundTest,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      backgroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    icon: _isTestingBackground
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00796B)),
+                          )
+                        : const Icon(Icons.play_circle_outline_rounded, size: 16, color: Color(0xFF00796B)),
+                    label: Text(
+                      _isTestingBackground
+                          ? 'Test en cours...'
+                          : 'Tester l\'arrière-plan (notif)',
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF00796B),
+                      ),
+                    ),
+                  ),
+                ),
+                if (_isRestrictedOem) ...[
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: () => BackgroundReservationService.openAutoStartSettings(),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      backgroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    icon: const Icon(Icons.settings_power_rounded, size: 15, color: Color(0xFF47645D)),
+                    label: const Text(
+                      'Démarrage auto',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF47645D),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDiagnosticChip({
+    required String label,
+    required bool isOk,
+    VoidCallback? onTap,
+  }) {
+    final bgColor = isOk ? const Color(0xFFEAF5EC) : const Color(0xFFFFF3E0);
+    final fgColor = isOk ? const Color(0xFF2E7D32) : const Color(0xFFE65100);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: fgColor.withValues(alpha: 0.25)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: fgColor,
+          ),
         ),
       ),
     );
@@ -1017,16 +1419,26 @@ class _HomeScreenState extends State<HomeScreen> {
   // ==========================================
   Widget _buildHistoriqueTabContent() {
     final lastBgTime = widget.prefsService.lastBgRunTime;
+    final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
     // Filter reservations
     final filtered = _reservations.where((r) {
       if (_activeFilter == 'all') return true;
-      if (_activeFilter == 'reserved') return true;
+      if (_activeFilter == 'reserved') {
+        return r.dateReserve.compareTo(todayStr) >= 0;
+      }
+      if (_activeFilter == 'tocheck') {
+        return r.canDelete;
+      }
       return true;
     }).toList();
 
     return RefreshIndicator(
-      onRefresh: _loadReservations,
+      onRefresh: () async {
+        await widget.prefsService.reload();
+        await _loadReservations();
+        await _loadBackgroundDiagnostics();
+      },
       color: const Color(0xFF00796B),
       child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
@@ -1072,7 +1484,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        lastBgTime != null ? lastBgTime.split(' ').last : '06:32',
+                        lastBgTime != null ? lastBgTime.split(' ').last : '—',
                         style: const TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.w600,
@@ -1080,9 +1492,9 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(height: 2),
-                      const Text(
-                        'Dernière synchro',
-                        style: TextStyle(fontSize: 11, color: Color(0xFF637571)),
+                      Text(
+                        lastBgTime != null ? 'Dernière synchro' : 'Aucune synchro auto',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFF637571)),
                       ),
                     ],
                   ),
@@ -1248,7 +1660,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (dateStr == todayStr) return "Aujourd’hui";
     if (dateStr == tomorrowStr) return "Demain";
-    return DateFormat('EEEE d MMMM', 'fr_FR').format(DateTime.parse(dateStr));
+    final parsed = DateTime.tryParse(dateStr);
+    if (parsed == null) return dateStr;
+    return DateFormat('EEEE d MMMM', 'fr_FR').format(parsed);
   }
 
   Widget _buildTicketRow(Reservation r) {
