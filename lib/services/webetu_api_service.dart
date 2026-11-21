@@ -17,6 +17,13 @@ class WebetuHttpOverrides extends HttpOverrides {
   }
 }
 
+class MfaRequiredException implements Exception {
+  final String message;
+  MfaRequiredException([this.message = 'Code de vérification 2FA (MFA) requis.']);
+  @override
+  String toString() => message;
+}
+
 class ReservationResultItem {
   final int mealType;
   final String mealName;
@@ -122,23 +129,43 @@ class WebetuApiService {
   }
 
   /// Full automated authentication workflow:
-  /// 1. PROGRES Login -> 2. Context resolution (Academic Year, DIA, Wilaya, Residence) -> 3. ONOU SSO Login
-  Future<StudentContext> authenticate(String username, String password) async {
+  /// 1. PROGRES Login (with optional mfaKey for 2FA) -> 2. Context resolution -> 3. ONOU SSO Login
+  Future<StudentContext> authenticate(
+    String username,
+    String password, {
+    String? mfaKey,
+  }) async {
     currentUsername = username;
     await fetchRemoteConfig();
 
     // 1. PROGRES Login
     final loginUrl = Uri.parse('$baseProgres/api/authentication/v1/');
-    final payload = jsonEncode({'username': username, 'password': password});
+    final Map<String, dynamic> bodyMap = {
+      'username': username,
+      'password': password,
+    };
+    if (mfaKey != null && mfaKey.trim().isNotEmpty) {
+      bodyMap['mfaKey'] = mfaKey.trim();
+    }
+    final payload = jsonEncode(bodyMap);
     final headers = _signHeaders(payload);
 
     final resp = await _client.post(loginUrl, body: payload, headers: headers).timeout(const Duration(seconds: 20));
 
     if (resp.statusCode != 200) {
+      final bodyStr = resp.body;
+      if (resp.statusCode == 400 && bodyStr.contains('mfaKey is required')) {
+        throw MfaRequiredException(
+          "Double authentification (2FA) requise. Veuillez saisir le code à 6 chiffres de votre application Authenticator.",
+        );
+      }
+      if (resp.statusCode == 400 && (bodyStr.contains('mfaKey') || bodyStr.toLowerCase().contains('invalid') || bodyStr.toLowerCase().contains('expire'))) {
+        throw Exception("Code 2FA incorrect ou expiré. Veuillez vérifier sur votre application Authenticator.");
+      }
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         throw Exception("Matricule ou mot de passe incorrect (Invalid credentials).");
       }
-      throw Exception("Échec de connexion Webetu (${resp.statusCode}): ${resp.body}");
+      throw Exception("Échec de connexion Webetu (${resp.statusCode}): $bodyStr");
     }
 
     final loginData = jsonDecode(resp.body) as Map<String, dynamic>;

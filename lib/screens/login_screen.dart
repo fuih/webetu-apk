@@ -21,10 +21,12 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _mfaController = TextEditingController();
 
   bool _rememberMe = true;
   bool _obscurePassword = true;
   bool _isLoading = false;
+  bool _showMfaInput = false;
   String? _errorMessage;
 
   @override
@@ -51,22 +53,35 @@ class _LoginScreenState extends State<LoginScreen> {
   void dispose() {
     _usernameController.dispose();
     _passwordController.dispose();
+    _mfaController.dispose();
     super.dispose();
   }
 
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
 
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text.trim();
+    final mfaCode = _showMfaInput ? _mfaController.text.trim() : null;
+
+    if (_showMfaInput && (mfaCode == null || mfaCode.length < 6)) {
+      setState(() {
+        _errorMessage = 'Veuillez saisir le code à 6 chiffres de votre application Authenticator.';
+      });
+      return;
+    }
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
-    final username = _usernameController.text.trim();
-    final password = _passwordController.text.trim();
-
     try {
-      final studentCtx = await widget.apiService.authenticate(username, password);
+      final studentCtx = await widget.apiService.authenticate(
+        username,
+        password,
+        mfaKey: mfaCode,
+      );
 
       // Save or clear credentials
       await widget.prefsService.saveCredentials(
@@ -87,6 +102,12 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       );
+    } on MfaRequiredException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _showMfaInput = true;
+        _errorMessage = e.message;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -253,6 +274,82 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ],
                               ),
 
+                              // 2FA / MFA Code Section (appears if account requires 2FA)
+                              if (_showMfaInput) ...[
+                                const SizedBox(height: 12),
+                                Container(
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFDDF4ED),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(color: const Color(0xFF00796B).withValues(alpha: 0.3)),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: const [
+                                          Icon(Icons.security_rounded, color: Color(0xFF00796B), size: 20),
+                                          SizedBox(width: 8),
+                                          Text(
+                                            'Double authentification (2FA)',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13,
+                                              color: Color(0xFF005D52),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      const Text(
+                                        'Ouvrez votre application d\'authentification (Google Authenticator, Authy...) et saisissez le code à 6 chiffres.',
+                                        style: TextStyle(fontSize: 12, color: Color(0xFF235F53), height: 1.3),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  controller: _mfaController,
+                                  keyboardType: TextInputType.number,
+                                  textInputAction: TextInputAction.done,
+                                  maxLength: 6,
+                                  textAlign: TextAlign.center,
+                                  autofocus: true,
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 8,
+                                    color: Color(0xFF00796B),
+                                  ),
+                                  decoration: InputDecoration(
+                                    counterText: '',
+                                    labelText: 'Code de sécurité (6 chiffres)',
+                                    hintText: '123456',
+                                    hintStyle: TextStyle(
+                                      letterSpacing: 8,
+                                      color: Colors.grey.shade400,
+                                      fontWeight: FontWeight.normal,
+                                    ),
+                                    prefixIcon: const Icon(Icons.pin_rounded, color: Color(0xFF00796B)),
+                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                                    focusedBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: const BorderSide(color: Color(0xFF00796B), width: 2),
+                                    ),
+                                    filled: true,
+                                    fillColor: const Color(0xFFF8F9FA),
+                                  ),
+                                  onChanged: (val) {
+                                    if (val.trim().length == 6) {
+                                      _handleLogin();
+                                    }
+                                  },
+                                  onFieldSubmitted: (_) => _handleLogin(),
+                                ),
+                              ],
+
                               if (_errorMessage != null) ...[
                                 const SizedBox(height: 8),
                                 Container(
@@ -295,12 +392,28 @@ class _LoginScreenState extends State<LoginScreen> {
                                         height: 20,
                                         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                                       )
-                                    : const Icon(Icons.login_rounded),
+                                    : Icon(_showMfaInput ? Icons.verified_user_rounded : Icons.login_rounded),
                                 label: Text(
-                                  _isLoading ? 'Connexion en cours...' : 'Se connecter',
+                                  _isLoading
+                                      ? (_showMfaInput ? 'Validation du code...' : 'Connexion en cours...')
+                                      : (_showMfaInput ? 'Valider le code 2FA' : 'Se connecter'),
                                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                                 ),
                               ),
+
+                              if (_showMfaInput) ...[
+                                const SizedBox(height: 8),
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      _showMfaInput = false;
+                                      _errorMessage = null;
+                                      _mfaController.clear();
+                                    });
+                                  },
+                                  child: const Text('Retour à la saisie des identifiants', style: TextStyle(fontSize: 12)),
+                                ),
+                              ],
                             ],
                           ),
                         ),

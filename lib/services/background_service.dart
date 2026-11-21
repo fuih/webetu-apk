@@ -109,7 +109,13 @@ void callbackDispatcher() {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('webetu_last_bg_run_time', nowFormatted);
       await prefs.setString('webetu_last_bg_run_status', 'error');
-      await prefs.setString('webetu_last_bg_run_message', "Échec de connexion : $e. Nouvelle tentative programmée.");
+
+      String errorMessage = "Échec de connexion : $e. Nouvelle tentative programmée.";
+      if (e is MfaRequiredException || e.toString().contains('2FA') || e.toString().contains('mfaKey')) {
+        errorMessage = "Double authentification (2FA) active : ouvrez l'application ou désactivez la 2FA dans WebEtu officiel pour l'auto-réservation.";
+      }
+
+      await prefs.setString('webetu_last_bg_run_message', errorMessage);
 
       // Return false to tell Android WorkManager to retry when network condition is met
       return false;
