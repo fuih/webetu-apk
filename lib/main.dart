@@ -101,24 +101,73 @@ class _SplashScreenState extends State<SplashScreen> {
     final user = widget.prefsService.savedUsername;
     final pass = widget.prefsService.savedPassword;
 
-    if (remember && user != null && pass != null && user.isNotEmpty && pass.isNotEmpty) {
-      try {
-        final studentCtx = await widget.apiService.authenticate(user, pass);
-        if (!mounted) return;
+    if (remember && user != null && user.isNotEmpty) {
+      // 1. Try to restore and validate existing active session first (avoids re-prompting 2FA)
+      final savedProgresToken = widget.prefsService.savedProgresToken;
+      final savedOnouToken = widget.prefsService.savedOnouToken;
+      final savedStudentUuid = widget.prefsService.savedStudentUuid;
+      final savedCtx = widget.prefsService.savedStudentContext;
 
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => HomeScreen(
-              apiService: widget.apiService,
-              prefsService: widget.prefsService,
-              studentContext: studentCtx,
-            ),
-          ),
+      if (savedProgresToken != null &&
+          savedOnouToken != null &&
+          savedStudentUuid != null &&
+          savedCtx != null) {
+        widget.apiService.restoreSession(
+          progresToken: savedProgresToken,
+          onouToken: savedOnouToken,
+          studentUuid: savedStudentUuid,
+          studentContext: savedCtx,
+          username: user,
         );
-        return;
-      } catch (_) {
-        // Fallback to login screen with prefilled credentials
+
+        final isValid = await widget.apiService.validateSession();
+        if (isValid) {
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => HomeScreen(
+                apiService: widget.apiService,
+                prefsService: widget.prefsService,
+                studentContext: savedCtx,
+              ),
+            ),
+          );
+          return;
+        }
+      }
+
+      // 2. Fallback to password re-login if session expired (works seamlessly if 2FA is not active)
+      if (pass != null && pass.isNotEmpty) {
+        try {
+          final studentCtx = await widget.apiService.authenticate(user, pass);
+          if (widget.apiService.progresToken != null &&
+              widget.apiService.onouToken != null &&
+              widget.apiService.studentUuid != null) {
+            await widget.prefsService.saveSession(
+              progresToken: widget.apiService.progresToken!,
+              onouToken: widget.apiService.onouToken!,
+              studentUuid: widget.apiService.studentUuid!,
+              studentContext: studentCtx,
+            );
+          }
+
+          if (!mounted) return;
+
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => HomeScreen(
+                apiService: widget.apiService,
+                prefsService: widget.prefsService,
+                studentContext: studentCtx,
+              ),
+            ),
+          );
+          return;
+        } catch (_) {
+          // Fallback to login screen (e.g. if 2FA code is needed or password changed)
+        }
       }
     }
 

@@ -1,9 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:workmanager/workmanager.dart';
 
+import '../models/student_context.dart';
 import 'webetu_api_service.dart';
 
 const String kDailyReservationTask = "dz.mesrs.webetu.daily_reservation";
@@ -40,7 +43,44 @@ void callbackDispatcher() {
       final activeDays = rawDays?.map((e) => int.tryParse(e) ?? 1).toSet() ?? {7, 1, 2, 3, 4};
 
       final api = WebetuApiService();
-      await api.authenticate(username, password);
+
+      // Check if we have an active saved session (especially useful for 2FA accounts)
+      final savedProgresToken = prefs.getString('webetu_progres_token');
+      final savedOnouToken = prefs.getString('webetu_onou_token');
+      final savedStudentUuid = prefs.getString('webetu_student_uuid');
+      final savedCtxJson = prefs.getString('webetu_student_context');
+
+      bool sessionRestored = false;
+      if (savedProgresToken != null && savedOnouToken != null && savedStudentUuid != null && savedCtxJson != null) {
+        try {
+          final ctx = StudentContext.fromJson(jsonDecode(savedCtxJson));
+          api.restoreSession(
+            progresToken: savedProgresToken,
+            onouToken: savedOnouToken,
+            studentUuid: savedStudentUuid,
+            studentContext: ctx,
+            username: username,
+          );
+          sessionRestored = true;
+        } catch (_) {}
+      }
+
+      if (!sessionRestored) {
+        await api.authenticate(username, password);
+      } else {
+        try {
+          await api.getReservations();
+        } catch (_) {
+          // Token expired, re-authenticate if possible
+          await api.authenticate(username, password);
+          if (api.isAuthenticated && api.studentContext != null) {
+            await prefs.setString('webetu_progres_token', api.progresToken!);
+            await prefs.setString('webetu_onou_token', api.onouToken!);
+            await prefs.setString('webetu_student_uuid', api.studentUuid!);
+            await prefs.setString('webetu_student_context', jsonEncode(api.studentContext!.toJson()));
+          }
+        }
+      }
 
       final existingReservations = await api.getReservations();
       final now = DateTime.now();
@@ -191,5 +231,37 @@ class BackgroundReservationService {
       backoffPolicy: BackoffPolicy.exponential,
       backoffPolicyDelay: const Duration(minutes: 5),
     );
+  }
+
+  static const MethodChannel _platform = MethodChannel('dz.mesrs.webetu/background_service');
+
+  /// Requests notification permission on Android 13+
+  static Future<bool> requestNotificationPermission() async {
+    try {
+      final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+      final androidImpl = flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      final granted = await androidImpl?.requestNotificationsPermission();
+      return granted ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Checks if battery optimization is disabled for reliable background execution
+  static Future<bool> isBatteryOptimizationIgnored() async {
+    try {
+      final res = await _platform.invokeMethod<bool>('isBatteryOptimizationIgnored');
+      return res ?? false;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Prompts Android OS to allow unconstrained background execution
+  static Future<void> requestIgnoreBatteryOptimization() async {
+    try {
+      await _platform.invokeMethod('requestIgnoreBatteryOptimization');
+    } catch (_) {}
   }
 }

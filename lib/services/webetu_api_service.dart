@@ -84,6 +84,34 @@ class WebetuApiService {
 
   bool get isAuthenticated => progresToken != null && onouToken != null;
 
+  void restoreSession({
+    required String progresToken,
+    required String onouToken,
+    required String studentUuid,
+    required StudentContext studentContext,
+    String? username,
+  }) {
+    this.progresToken = progresToken;
+    this.onouToken = onouToken;
+    this.studentUuid = studentUuid;
+    this.studentContext = studentContext;
+    if (username != null) currentUsername = username;
+  }
+
+  /// Quickly tests if the currently restored session tokens are still valid on ONOU / PROGRES
+  Future<bool> validateSession() async {
+    if (!isAuthenticated) return false;
+    try {
+      await fetchRemoteConfig();
+      final url = Uri.parse('$baseOnou/api/meal-reservations/student').replace(queryParameters: _buildQueryParams());
+      final headers = _signHeaders('', auth: onouToken, isBearer: true);
+      final resp = await _client.get(url, headers: headers).timeout(const Duration(seconds: 8));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Map<String, String> _signHeaders(String dataStr, {String? auth, bool isBearer = false}) {
     final timestamp = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
     final nonce = const Uuid().v4();

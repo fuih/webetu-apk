@@ -8,10 +8,13 @@ Application Android conçue avec Flutter pour automatiser la réservation quotid
 
 Les fichiers APK prêts à installer sont disponibles dans la section **Releases** :
 
-- **[`WebEtu-Resto-v1.1.0-arm64.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.1.0/WebEtu-Resto-v1.1.0-arm64.apk)** (~18 Mo — **recommandé** pour la majorité des smartphones Android récents)
-- **[`WebEtu-Resto-v1.1.0-universal.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.1.0/WebEtu-Resto-v1.1.0-universal.apk)** (~51 Mo — compatible avec tous les appareils Android)
+- **[`WebEtu-Resto-v1.2.0-arm64.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.2.0/WebEtu-Resto-v1.2.0-arm64.apk)** (~18 Mo — **recommandé** pour la majorité des smartphones Android récents)
+- **[`WebEtu-Resto-v1.2.0-universal.apk`](https://github.com/fuih/webetu-apk/releases/download/v1.2.0/WebEtu-Resto-v1.2.0-universal.apk)** (~51 Mo — compatible avec tous les appareils Android)
 
-> 🔐 **Nouveauté v1.1.0** : Prise en charge des comptes ayant activé la **Double Authentification (2FA / Google Authenticator)** sur PROGRES.
+> 🚀 **Nouveautés v1.2.0** :
+> - **Session 2FA persistante** : connexion automatique instantanée au démarrage sans redemander les identifiants ni le code 2FA.
+> - **Réservation en arrière-plan & Notifications** : demande d'autorisation d'ignorer l'optimisation de batterie et d'envoyer les notifications pour garantir la réservation nocturne automatique.
+> - **Alignement de la navigation** : icône « Historique » parfaitement centrée et symétrique.
 
 ---
 

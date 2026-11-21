@@ -90,6 +90,18 @@ class _LoginScreenState extends State<LoginScreen> {
         rememberMe: _rememberMe,
       );
 
+      if (_rememberMe &&
+          widget.apiService.progresToken != null &&
+          widget.apiService.onouToken != null &&
+          widget.apiService.studentUuid != null) {
+        await widget.prefsService.saveSession(
+          progresToken: widget.apiService.progresToken!,
+          onouToken: widget.apiService.onouToken!,
+          studentUuid: widget.apiService.studentUuid!,
+          studentContext: studentCtx,
+        );
+      }
+
       if (!mounted) return;
 
       Navigator.pushReplacement(

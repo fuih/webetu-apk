@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/student_context.dart';
 
 class PreferencesService {
   static const String _keyUsername = 'webetu_username';
@@ -12,6 +14,10 @@ class PreferencesService {
   static const String _keyLastBgRunStatus = 'webetu_last_bg_run_status';
   static const String _keyLastBgRunMessage = 'webetu_last_bg_run_message';
   static const String _keyActiveDays = 'webetu_active_days';
+  static const String _keyProgresToken = 'webetu_progres_token';
+  static const String _keyOnouToken = 'webetu_onou_token';
+  static const String _keyStudentUuid = 'webetu_student_uuid';
+  static const String _keyStudentContext = 'webetu_student_context';
 
   final SharedPreferences _prefs;
 
@@ -27,6 +33,41 @@ class PreferencesService {
   String? get savedUsername => _prefs.getString(_keyUsername);
 
   String? get savedPassword => _prefs.getString(_keyPassword);
+
+  String? get savedProgresToken => _prefs.getString(_keyProgresToken);
+
+  String? get savedOnouToken => _prefs.getString(_keyOnouToken);
+
+  String? get savedStudentUuid => _prefs.getString(_keyStudentUuid);
+
+  StudentContext? get savedStudentContext {
+    final raw = _prefs.getString(_keyStudentContext);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      return StudentContext.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveSession({
+    required String progresToken,
+    required String onouToken,
+    required String studentUuid,
+    required StudentContext studentContext,
+  }) async {
+    await _prefs.setString(_keyProgresToken, progresToken);
+    await _prefs.setString(_keyOnouToken, onouToken);
+    await _prefs.setString(_keyStudentUuid, studentUuid);
+    await _prefs.setString(_keyStudentContext, jsonEncode(studentContext.toJson()));
+  }
+
+  Future<void> clearSession() async {
+    await _prefs.remove(_keyProgresToken);
+    await _prefs.remove(_keyOnouToken);
+    await _prefs.remove(_keyStudentUuid);
+    await _prefs.remove(_keyStudentContext);
+  }
 
   int? get defaultDepotId => _prefs.getInt(_keyDefaultDepot);
 
@@ -59,6 +100,7 @@ class PreferencesService {
     await _prefs.remove(_keyUsername);
     await _prefs.remove(_keyPassword);
     await _prefs.setBool(_keyRememberMe, false);
+    await clearSession();
   }
 
   Future<void> saveDefaultDepot(int depotId) async {

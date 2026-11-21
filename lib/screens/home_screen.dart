@@ -140,10 +140,136 @@ class _HomeScreenState extends State<HomeScreen> {
     if (value) {
       await BackgroundReservationService.enableDailyReservation();
       _showSnackbar('Pilote automatique activé ! Vos repas seront réservés chaque jour.');
+
+      // Request notification permission and background battery optimization
+      await BackgroundReservationService.requestNotificationPermission();
+      final isIgnored = await BackgroundReservationService.isBatteryOptimizationIgnored();
+      if (!isIgnored && mounted) {
+        await _showBackgroundOptimizationPrompt();
+      }
     } else {
       await BackgroundReservationService.disableDailyReservation();
       _showSnackbar('Pilote automatique mis en pause.');
     }
+  }
+
+  Future<void> _showBackgroundOptimizationPrompt() async {
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE0E7E5),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDDF4ED),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.bolt_rounded, color: Color(0xFF00796B), size: 24),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Autorisation d\'arrière-plan',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF172E2B),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Pour garantir que WebEtu Resto réserve automatiquement vos repas chaque soir même si vous n\'ouvrez pas l\'application :',
+              style: TextStyle(fontSize: 13, color: Color(0xFF637571), height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8F9FA),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFE0E7E5)),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.notifications_active_rounded, color: Color(0xFF00796B), size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Notifications : pour vous alerter du succès de la réservation.',
+                          style: TextStyle(fontSize: 12, color: Color(0xFF172E2B)),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: const [
+                      Icon(Icons.battery_charging_full_rounded, color: Color(0xFF00796B), size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Batterie sans restriction : pour éviter qu\'Android ne bloque la tâche.',
+                          style: TextStyle(fontSize: 12, color: Color(0xFF172E2B)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF00796B),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                ),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await BackgroundReservationService.requestIgnoreBatteryOptimization();
+                },
+                child: const Text('Autoriser l\'arrière-plan', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Center(
+              child: TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Plus tard', style: TextStyle(color: Color(0xFF637571))),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _saveAllPreferences() async {
@@ -1286,14 +1412,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: _currentTabIndex == 1 ? const Color(0xFFDDF4ED) : Colors.transparent,
                       borderRadius: BorderRadius.circular(14),
                     ),
-                    child: Badge(
-                      isLabelVisible: _reservations.isNotEmpty,
-                      label: Text('${_reservations.length}', style: const TextStyle(fontSize: 10)),
-                      child: Icon(
-                        Icons.history_rounded,
-                        size: 20,
-                        color: _currentTabIndex == 1 ? const Color(0xFF00796B) : const Color(0xFF637571),
-                      ),
+                    child: Icon(
+                      Icons.history_rounded,
+                      size: 20,
+                      color: _currentTabIndex == 1 ? const Color(0xFF00796B) : const Color(0xFF637571),
                     ),
                   ),
                   const SizedBox(height: 2),
